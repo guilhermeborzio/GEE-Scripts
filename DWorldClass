@@ -1,0 +1,334 @@
+// ======================== DYNAMIC WORLD LAND COVER AND USE CLASSIFICATION ======================
+
+//     This tool uses Google's Dynamic World deep learning to classify land cover and use within the polygon entered by the user, 
+//     providing information such as: quantification of classes and analysis period. 
+//     The classification is done in near realtime on top of the Sentinel-2 image chosen by the user.
+
+
+// ==========================================================
+// Configurar Ferramenta de Desenho e Inserção Manual de Coordenadas
+// ==========================================================
+
+// Variável global para armazenar a geometria manual
+var geometryManual = null;
+
+// Configurar a ferramenta de desenho (opcional)
+var drawingTools = Map.drawingTools();
+drawingTools.setShape('polygon'); 
+drawingTools.setShown(true);
+
+// Caixa de texto para inserir coordenadas (formato: lon,lat,0 separados por espaço)
+var txtCoordinates = ui.Textbox({
+  placeholder: "Enter coordinates..."
+});
+
+var btnConvert = ui.Button({
+  label: "Convert and Create Geometry",
+  onClick: function() {
+    var coordStr = txtCoordinates.getValue();
+    // Divide a string em partes (cada parte: "lon,lat,0")
+    var coords = coordStr.trim().split(' ').map(function(coordStr) {
+      var parts = coordStr.split(',');
+      return [parseFloat(parts[0]), parseFloat(parts[1])];
+    });
+    // Verifica se o polígono está fechado (primeiro e último ponto iguais)
+    if (coords.length > 0) {
+      var first = coords[0];
+      var last = coords[coords.length - 1];
+      if (first[0] !== last[0] || first[1] !== last[1]) {
+        coords.push(first);
+      }
+    }
+    // Cria a geometria manual e armazena na variável global
+    geometryManual = ee.Geometry.Polygon([coords]);
+    Map.centerObject(geometryManual, 13);
+    Map.addLayer(geometryManual, {color: 'red'}, 'Polígono Manual');
+    print('Geometria criada:', geometryManual);
+  }
+});
+
+var btnLimparGeometria = ui.Button({
+  label: 'Erase Geometry',
+  onClick: function() {
+    // Reinicia a variável que guarda a geometria manual
+    geometryManual = null;
+    
+    // Remove todos os desenhos da ferramenta de desenho
+    var layers = drawingTools.layers();
+    // Cria uma cópia dos layers para evitar problemas ao remover enquanto itera
+    var layersList = [];
+    layers.forEach(function(layer) {
+      layersList.push(layer);
+    });
+    layersList.forEach(function(layer) {
+      drawingTools.layers().remove(layer);
+    });
+    
+    // Remove a camada 'Polígono Manual' do mapa, se existir
+    Map.layers().forEach(function(layer) {
+      if (layer.getName && layer.getName() === 'Polígono Manual') {
+        Map.layers().remove(layer);
+      }
+    });
+    print('Cleaned geometry.');
+  }
+});
+
+
+var painelCoordenadas = ui.Panel({
+  widgets: [
+    ui.Label("Enter coordinates (format: lon, lat, 0 separated by space). Or draw a polygon."),
+    txtCoordinates,
+    btnConvert,
+    btnLimparGeometria
+  ],
+  style: {position: 'top-right', width: '300px', padding: '8px'}
+});
+Map.add(painelCoordenadas); // Adiciona no mapa (canto superior direito)
+
+// ==========================================================
+// Painéis para exibir Data e Áreas (canto superior esquerdo)
+// ==========================================================
+var painelData = ui.Panel({
+  widgets: [ui.Label('📅 Image Date: Waiting polygon...')],
+  style: {position: 'top-left', height: '55px', padding: '8px'}
+});
+Map.add(painelData);
+
+var painelAreas = ui.Panel({
+  widgets: [ui.Label('📊 Areas by Class:', {fontWeight: 'bold'})],
+  style: {position: 'top-left', height: '150px', padding: '8px'}
+});
+Map.add(painelAreas);
+
+// ==========================================================
+// Painel para seleção do período de imageamento (canto superior direito, dentro do painel de controle)
+// ==========================================================
+var today = new Date();
+var todayStr = today.toISOString().slice(0,10);
+
+var txtStart = ui.Textbox({value: '2025-01-01', placeholder: 'YYYY-MM-DD'});
+var txtEnd = ui.Textbox({value: todayStr, placeholder: 'YYYY-MM-DD'});
+var painelPeriodo = ui.Panel({
+  widgets: [
+    ui.Label('Select imaging period:'),
+    ui.Label('Start Date:'),
+    txtStart,
+    ui.Label('End Date:'),
+    txtEnd
+  ],
+  layout: ui.Panel.Layout.flow('vertical'),
+  style: {padding: '8px'}
+});
+
+// ==========================================================
+// Variáveis para Dynamic World e Classificação
+// ==========================================================
+var dwPalette = ['#419BDF', '#397D49', '#88B053', '#7A87C6',
+    '#E49635', '#DFC35A', '#C4281B', '#A59B8F', '#B39FE1'];
+var dwLabels = ['Water', 'Trees', 'Grass', 'Bare Soil',
+                'Crops', 'Shrub and Scrub', 'Built', 'Undefined', 'Snow and Ice'];
+var dwVisParams = {min: 0, max: 8, palette: dwPalette};
+
+var newPalette = ['#419BDF', '#88B053', '#DFC35A', '#E49635', '#C4281B', '#A59B8F'];
+var newVisParams = {min: 0, max: 5, palette: newPalette};
+
+// Função para compor o composite do Dynamic World com o período definido
+function comporDynamicWorld(startDate, endDate) {
+  var dw = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1')
+      .filterDate(startDate, endDate)
+      .median();
+  var classification = dw.select('label');
+  return classification.reduce(ee.Reducer.mode());
+}
+
+// ==========================================================
+// Função para calcular a área por classe com verificação
+// ==========================================================
+function calcularArea(poligono, dwComposite) {
+  var mask = dwComposite.clip(poligono);
+  var areaImage = ee.Image.pixelArea().divide(10000).rename('area'); // hectares
+  var maskWithArea = areaImage.addBands(mask);
+  var areaPorClasse = maskWithArea.reduceRegion({
+    reducer: ee.Reducer.sum().group({
+      groupField: 1,
+      groupName: 'Classe'
+    }),
+    geometry: poligono,
+    scale: 10,
+    maxPixels: 1e13
+  });
+  var grupos = ee.List(ee.Algorithms.If(
+    ee.Dictionary(areaPorClasse).contains('groups'),
+    areaPorClasse.get('groups'),
+    []
+  ));
+  return ee.FeatureCollection(grupos.map(function(item) {
+    var obj = ee.Dictionary(item);
+    var classId = obj.get('Classe');
+    var area = obj.get('sum');
+    return ee.Feature(null, {'Classe': classId, 'Área (ha)': area});
+  }));
+}
+
+// ==========================================================
+//  Função para criar a camada Probability Hillshade
+// ==========================================================
+function computeProbabilityHillshade(dwComposite) {
+  var dw = ee.ImageCollection('GOOGLE/DYNAMICWORLD/V1')
+      .filterDate(txtStart.getValue(), txtEnd.getValue())
+      .median();
+  var probabilityBands = [
+      'water', 'trees', 'grass', 'flooded_vegetation', 'crops',
+      'shrub_and_scrub', 'built', 'bare', 'snow_and_ice'
+  ];
+  var probabilityCol = dw.select(probabilityBands);
+  var meanProbability = probabilityCol.reduce(ee.Reducer.mean());
+  var projection = ee.Projection('EPSG:3857').atScale(10);
+  meanProbability = meanProbability.setDefaultProjection(projection);
+  var top1Probability = meanProbability.reduce(ee.Reducer.max());
+  var top1Confidence = top1Probability.multiply(100).int();
+  var hillshade = ee.Terrain.hillshade(top1Confidence).divide(255);
+  var rgbImage = dwComposite.visualize(dwVisParams).divide(255);
+  return rgbImage.multiply(hillshade);
+}
+
+// ==========================================================
+//  Botão para Processar Classificação, Exibir Data e Calcular Área
+// ==========================================================
+var btnClassificar = ui.Button({
+  label: 'Process',
+  onClick: function() {
+    // Tenta usar a geometria manual; se não, usa a do drawingTools
+    var ftCollection = drawingTools.toFeatureCollection();
+    var featuresCount = ftCollection.size().getInfo();
+    var geometria;
+    if (geometryManual !== null) {
+      geometria = geometryManual;
+    } else if (featuresCount > 0) {
+      geometria = ftCollection.first().geometry();
+    } else {
+      print("⚠️ No valid geometry defined! Enter coordinates manually or draw a polygon.");
+      painelData.widgets().set(0, ui.Label("⚠️ No valid geometry!"));
+      return;
+    }
+    
+    var startDate = txtStart.getValue();
+    var endDate   = txtEnd.getValue();
+    
+    // Compor o composite do Dynamic World para o período definido
+    var dwComposite = comporDynamicWorld(startDate, endDate);
+    
+    // Calcular a camada Probability Hillshade
+    var probabilityHillshade = computeProbabilityHillshade(dwComposite);
+    
+   // Função para mascarar nuvens utilizando a banda QA60
+    function maskS2clouds(image) {
+      var qa = image.select('QA60');
+      var cloudBitMask = 1 << 10;    // bit 10: nuvens
+      var cirrusBitMask = 1 << 11;   // bit 11: cirrus
+      var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+              .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask);
+}
+   
+    // Filtrar a coleção Sentinel-2 com o período e área definidos
+    var sentinelCol = ee.ImageCollection('COPERNICUS/S2_HARMONIZED')
+      .filterBounds(geometria)
+      .filterDate(startDate, endDate)
+      .map(maskS2clouds)
+      .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+      .sort('CLOUDY_PIXEL_PERCENTAGE');
+      
+    sentinelCol.size().evaluate(function(count) {
+      if (count === 0) {
+        print("⚠️ No Sentinel-2 imagery found for the selected period and area.");
+        return;
+      }
+      var sentinel = sentinelCol.first();
+      
+      // Extrai a máscara da imagem Sentinel (usando, por exemplo, a banda B8)
+      var cloudMask = sentinel.select('B8').mask();
+      
+      //Aplica a máscara ao composite Dynamic World
+      var dwCompositeMasked = dwComposite.updateMask(cloudMask);
+      
+      // Obter e exibir a data da imagem Sentinel-2
+      var dataMillis = sentinel.get('system:time_start');
+      dataMillis.evaluate(function(valor) {
+        var dataFormatada = valor ? ee.Date(valor).format('YYYY-MM-dd').getInfo() : '⚠️ No Data Avaible';
+        print('📅 Date of Selected Image:', dataFormatada);
+        painelData.widgets().set(0, ui.Label('📅 Image Date: ' + dataFormatada));
+      });
+      
+      // Calcular a área das classes usando o composite do Dynamic World
+      var areaCalculada = calcularArea(geometria, dwComposite);
+      areaCalculada.evaluate(function(result) {
+        painelAreas.clear();
+        painelAreas.add(ui.Label('📊 Areas by Class:', {fontWeight: 'bold'}));
+        if (result && result.features && result.features.length > 0) {
+          result.features.forEach(function(feature) {
+            var classeId = feature.properties.Classe;
+            var area = feature.properties['Área (ha)'];
+            var nomeClasse = dwLabels[classeId];
+            painelAreas.add(ui.Label(nomeClasse + ': ' + area.toFixed(2) + ' ha'));
+            print(nomeClasse + ': ' + area.toFixed(2) + ' ha');
+          });
+        } else {
+          painelAreas.add(ui.Label('⚠️ No classes found in polygon!'));
+        }
+      });
+      
+      // Adicionar camadas ao Mapa
+      Map.addLayer(dwCompositeMasked.clip(geometria), newVisParams, 'Land Use Classification')
+      Map.layers().reset();
+      Map.addLayer(sentinel, {bands: ['B4', 'B3', 'B2'], min: 0, max: 3000}, 'Sentinel-2 RGB');
+      //Map.addLayer(dwComposite.clip(geometria), dwVisParams, 'Classificação de Uso do Solo');
+      Map.addLayer(probabilityHillshade.clip(geometria), {min: 0, max: 0.8}, 'Probability Hillshade');
+    });
+  }
+});
+
+// ==========================================================
+//  Painel de Legenda no canto inferior esquerdo
+// ==========================================================
+var legenda = ui.Panel({
+  widgets: [ui.Label('📌 Legend - Dynamic World', {fontWeight: 'bold'})],
+  style: {
+    position: 'bottom-left',
+    width: '200px',
+    maxHeight: '300px',
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
+    padding: '8px'
+  }
+});
+dwPalette.forEach(function(cor, index) {
+  var row = ui.Panel({
+    widgets: [
+      ui.Label({style: {backgroundColor: cor, padding: '8px', margin: '4px', width: '20px'}}),
+      ui.Label(dwLabels[index], {margin: '4px 0px'})
+    ],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+  legenda.add(row);
+});
+  
+// ==========================================================
+//  Painel de Controle Principal (inclui o painel de período) no canto superior direito
+// ==========================================================
+var painelLateral = ui.Panel({
+  widgets: [
+    ui.Label('Classification and Quantification of Areas', {fontSize: '15px', fontWeight: 'bold'}),
+    painelPeriodo,
+    ui.Label('Click "Convert and Create Geometry" if you are inserting manually.'),
+    btnClassificar
+  ],
+  layout: ui.Panel.Layout.flow('vertical'),
+  style: {position: 'top-right', width: '300px', padding: '8px'}
+});
+
+// ==========================================================
+//  Adicionar os painéis à interface
+// ==========================================================
+Map.add(painelLateral);
+Map.add(legenda);
