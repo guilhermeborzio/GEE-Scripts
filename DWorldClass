@@ -283,7 +283,7 @@ var btnClassificar = ui.Button({
       Map.addLayer(dwCompositeMasked.clip(geometria), newVisParams, 'Land Use Classification')
       Map.layers().reset();
       Map.addLayer(sentinel, {bands: ['B4', 'B3', 'B2'], min: 0, max: 3000}, 'Sentinel-2 RGB');
-      //Map.addLayer(dwComposite.clip(geometria), dwVisParams, 'Classificação de Uso do Solo');
+      //Map.addLayer(dwComposite.clip(geometria), dwVisParams, 'Land Use Classification');
       Map.addLayer(probabilityHillshade.clip(geometria), {min: 0, max: 0.8}, 'Probability Hillshade');
     });
   }
@@ -320,7 +320,6 @@ var painelLateral = ui.Panel({
   widgets: [
     ui.Label('Classification and Quantification of Areas', {fontSize: '15px', fontWeight: 'bold'}),
     painelPeriodo,
-    ui.Label('Click "Convert and Create Geometry" if you are inserting manually.'),
     btnClassificar
   ],
   layout: ui.Panel.Layout.flow('vertical'),
