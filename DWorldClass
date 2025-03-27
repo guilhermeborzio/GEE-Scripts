@@ -91,7 +91,7 @@ Map.add(painelCoordenadas); // Adiciona no mapa (canto superior direito)
 // ==========================================================
 var painelData = ui.Panel({
   widgets: [ui.Label('📅 Image Date: Waiting polygon...')],
-  style: {position: 'top-left', height: '55px', padding: '8px'}
+  style: {position: 'bottom-center', height: '55px', padding: '8px'}
 });
 Map.add(painelData);
 
